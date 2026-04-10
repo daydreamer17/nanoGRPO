@@ -5,11 +5,15 @@ import json
 import os
 from pathlib import Path
 
+from dense_reward_v2 import build_dense_reward_v2_funcs
 from grpo_gsm8k_utils import (
     DEFAULT_DATASET_ROOT,
     DEFAULT_MODEL_NAME,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_WANDB_PROJECT,
+    append_jsonl_record,
+    build_run_results_jsonl_path,
+    build_run_summary_path,
     build_default_run_name,
     completion_to_text,
     configure_runtime_env,
@@ -17,6 +21,8 @@ from grpo_gsm8k_utils import (
     has_wandb_auth_configured,
     parse_bool,
     preprocess_gsm8k_example,
+    utc_now_iso,
+    write_json_file,
 )
 
 
@@ -24,19 +30,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a minimal-but-effective GRPO run on GSM8K.")
     parser.add_argument("--dataset_root", type=str, default=str(DEFAULT_DATASET_ROOT))
     parser.add_argument("--output_dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--use_run_subdir", type=parse_bool, default=True)
     parser.add_argument("--model_name", type=str, default=DEFAULT_MODEL_NAME)
+    parser.add_argument("--reward_scheme", type=str, choices=("baseline", "dense_v2"), default="baseline")
     parser.add_argument("--train_slice", type=str, default="train[:512]")
     parser.add_argument("--eval_size", type=int, default=32)
-    parser.add_argument("--max_steps", type=int, default=100)
+    parser.add_argument("--max_steps", type=int, default=200)
     parser.add_argument("--max_prompt_length", type=int, default=256)
-    parser.add_argument("--max_completion_length", type=int, default=128)
+    parser.add_argument("--max_completion_length", type=int, default=160)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--num_generations", type=int, default=4)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--learning_rate", type=float, default=5e-6)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--beta", type=float, default=0.0)
-    parser.add_argument("--save_steps", type=int, default=25)
+    parser.add_argument("--save_steps", type=int, default=10)
+    parser.add_argument("--save_total_limit", type=int, default=20)
     parser.add_argument("--logging_steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_vllm", type=parse_bool, default=True)
@@ -47,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb_run_name", type=str, default="")
     parser.add_argument("--bf16", type=parse_bool, default=True)
     parser.add_argument("--gradient_checkpointing", type=parse_bool, default=True)
+    parser.add_argument("--offline", type=parse_bool, default=False)
     return parser
 
 
@@ -64,6 +74,53 @@ def answer_reward(completions, solution, **kwargs):
         text = completion_to_text(completion)
         rewards.append(1.0 if extract_final_answer_from_text(text) == gold else 0.0)
     return rewards
+
+
+def resolve_reward_funcs(reward_scheme: str) -> list:
+    if reward_scheme == "baseline":
+        return [format_reward, answer_reward]
+    if reward_scheme == "dense_v2":
+        return build_dense_reward_v2_funcs()
+    raise ValueError(f"Unsupported reward_scheme: {reward_scheme}")
+
+
+def resolve_primary_answer_metric_name(reward_scheme: str) -> str:
+    if reward_scheme == "baseline":
+        return "answer_reward"
+    if reward_scheme == "dense_v2":
+        return "exact_answer_reward"
+    raise ValueError(f"Unsupported reward_scheme: {reward_scheme}")
+
+
+def resolve_primary_format_metric_name(reward_scheme: str) -> str:
+    if reward_scheme == "baseline":
+        return "format_reward"
+    if reward_scheme == "dense_v2":
+        return "strict_format_reward"
+    raise ValueError(f"Unsupported reward_scheme: {reward_scheme}")
+
+
+def build_reward_metric_key(metric_name: str) -> str:
+    return f"rewards/{metric_name}/mean"
+
+
+def build_reward_metric_summary(log_rows: list[dict], reward_func_names: list[str]) -> dict[str, dict | None]:
+    summary = {}
+    for reward_name in reward_func_names:
+        metric_key = build_reward_metric_key(reward_name)
+        best_row = select_best_row(log_rows, metric_key)
+        summary[reward_name] = {
+            "step": best_row.get("step") if best_row else None,
+            "value": best_row.get(metric_key) if best_row else None,
+        }
+    return summary
+
+
+def extract_final_log_row(log_rows: list[dict]) -> dict:
+    for row in reversed(log_rows):
+        if "reward" in row:
+            return row
+    return log_rows[-1] if log_rows else {}
 
 
 def ensure_online_wandb_login(project: str, run_name: str) -> None:
@@ -147,7 +204,7 @@ def build_training_args(args, output_dir: Path, run_name: str):
         logging_first_step=True,
         save_strategy="steps",
         save_steps=args.save_steps,
-        save_total_limit=4,
+        save_total_limit=args.save_total_limit,
         max_steps=args.max_steps,
         learning_rate=args.learning_rate,
         warmup_ratio=0.05,
@@ -173,19 +230,144 @@ def build_training_args(args, output_dir: Path, run_name: str):
     )
 
 
+def resolve_training_output_dir(experiment_dir: Path, run_name: str, use_run_subdir: bool) -> Path:
+    if not use_run_subdir:
+        return experiment_dir
+    return experiment_dir / run_name
+
+
 def write_run_metadata(output_dir: Path, metadata: dict) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "run_metadata.json").open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, ensure_ascii=True)
 
 
+def select_best_row(log_rows: list[dict], metric_name: str) -> dict | None:
+    rows_with_metric = [row for row in log_rows if metric_name in row]
+    if not rows_with_metric:
+        return None
+    return max(rows_with_metric, key=lambda row: row[metric_name])
+
+
+def build_training_summary(
+    args,
+    run_name: str,
+    experiment_dir: Path,
+    output_dir: Path,
+    final_adapter_dir: Path,
+    reward_func_names: list[str],
+    trainer,
+    train_result,
+) -> dict:
+    log_rows = [row for row in trainer.state.log_history if "step" in row]
+    final_row = extract_final_log_row(log_rows)
+    best_reward_row = select_best_row(log_rows, "reward")
+    primary_answer_metric_name = resolve_primary_answer_metric_name(args.reward_scheme)
+    primary_format_metric_name = resolve_primary_format_metric_name(args.reward_scheme)
+    primary_answer_metric_key = build_reward_metric_key(primary_answer_metric_name)
+    primary_format_metric_key = build_reward_metric_key(primary_format_metric_name)
+    best_answer_reward_row = select_best_row(log_rows, primary_answer_metric_key)
+    best_format_reward_row = select_best_row(log_rows, primary_format_metric_key)
+    final_reward_metrics = {
+        reward_name: final_row.get(build_reward_metric_key(reward_name)) for reward_name in reward_func_names
+    }
+    best_reward_metrics = build_reward_metric_summary(log_rows, reward_func_names)
+
+    checkpoint_dirs = sorted(path.name for path in output_dir.glob("checkpoint-*") if path.is_dir())
+    train_metrics = dict(train_result.metrics)
+    train_metrics["global_step"] = trainer.state.global_step
+
+    return {
+        "summary_type": "train",
+        "created_at": utc_now_iso(),
+        "run_name": run_name,
+        "wandb_project": args.wandb_project,
+        "model_name": args.model_name,
+        "experiment_dir": str(experiment_dir),
+        "output_dir": str(output_dir),
+        "final_adapter_dir": str(final_adapter_dir),
+        "train_slice": args.train_slice,
+        "train_examples": len(trainer.train_dataset),
+        "eval_examples": len(trainer.eval_dataset) if trainer.eval_dataset is not None else 0,
+        "offline": args.offline,
+        "use_vllm": args.use_vllm,
+        "vllm_mode": args.vllm_mode,
+        "reward_scheme": args.reward_scheme,
+        "reward_func_names": reward_func_names,
+        "config": {
+            "max_steps": args.max_steps,
+            "save_steps": args.save_steps,
+            "save_total_limit": args.save_total_limit,
+            "learning_rate": args.learning_rate,
+            "max_prompt_length": args.max_prompt_length,
+            "max_completion_length": args.max_completion_length,
+            "per_device_train_batch_size": args.per_device_train_batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "num_generations": args.num_generations,
+            "temperature": args.temperature,
+            "beta": args.beta,
+        },
+        "global_step": trainer.state.global_step,
+        "epoch": trainer.state.epoch,
+        "checkpoint_dirs": checkpoint_dirs,
+        "train_metrics": train_metrics,
+        "final_metrics": {
+            "step": final_row.get("step"),
+            "reward": final_row.get("reward"),
+            "answer_reward_mean": final_row.get(primary_answer_metric_key),
+            "format_reward_mean": final_row.get(primary_format_metric_key),
+            "loss": final_row.get("loss"),
+            "entropy": final_row.get("entropy"),
+            "mean_completion_length": final_row.get("completions/mean_length"),
+            "clipped_ratio": final_row.get("completions/clipped_ratio"),
+            "reward_metrics": final_reward_metrics,
+        },
+        "best_metrics": {
+            "reward": {
+                "step": best_reward_row.get("step") if best_reward_row else None,
+                "value": best_reward_row.get("reward") if best_reward_row else None,
+            },
+            "answer_reward_mean": {
+                "step": best_answer_reward_row.get("step") if best_answer_reward_row else None,
+                "value": best_answer_reward_row.get(primary_answer_metric_key) if best_answer_reward_row else None,
+            },
+            "format_reward_mean": {
+                "step": best_format_reward_row.get("step") if best_format_reward_row else None,
+                "value": best_format_reward_row.get(primary_format_metric_key) if best_format_reward_row else None,
+            },
+            "reward_metrics": best_reward_metrics,
+        },
+        "nonzero_reward_steps": sum(1 for row in log_rows if row.get("reward", 0.0) > 0.0),
+        "nonzero_answer_reward_steps": sum(
+            1 for row in log_rows if row.get(primary_answer_metric_key, 0.0) > 0.0
+        ),
+        "nonzero_format_reward_steps": sum(
+            1 for row in log_rows if row.get(primary_format_metric_key, 0.0) > 0.0
+        ),
+    }
+
+
+def persist_training_summary(experiment_dir: Path, output_dir: Path, run_name: str, summary: dict) -> None:
+    summary_path = build_run_summary_path(output_dir, "train", run_name)
+    summary["summary_path"] = str(summary_path)
+    summary["run_results_path"] = str(build_run_results_jsonl_path(output_dir))
+    aggregate_results_path = build_run_results_jsonl_path(experiment_dir)
+    summary["aggregate_run_results_path"] = str(aggregate_results_path)
+    write_json_file(summary_path, summary)
+    append_jsonl_record(summary["run_results_path"], summary)
+    if aggregate_results_path != Path(summary["run_results_path"]):
+        append_jsonl_record(aggregate_results_path, summary)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    runtime_paths = configure_runtime_env(args.dataset_root, args.output_dir)
-    output_dir = runtime_paths.output_dir
+    runtime_paths = configure_runtime_env(args.dataset_root, args.output_dir, offline=args.offline)
     run_name = args.wandb_run_name or build_default_run_name()
+    experiment_dir = runtime_paths.output_dir
+    output_dir = resolve_training_output_dir(experiment_dir, run_name, args.use_run_subdir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     ensure_online_wandb_login(args.wandb_project, run_name)
 
@@ -220,12 +402,14 @@ def main() -> None:
         ],
     )
 
+    reward_funcs = resolve_reward_funcs(args.reward_scheme)
+    reward_func_names = [reward_func.__name__ for reward_func in reward_funcs]
     training_args = build_training_args(args, output_dir, run_name)
 
     trainer = GRPOTrainer(
         model=args.model_name,
         args=training_args,
-        reward_funcs=[format_reward, answer_reward],
+        reward_funcs=reward_funcs,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
@@ -234,21 +418,34 @@ def main() -> None:
 
     metadata = {
         "model_name": args.model_name,
+        "reward_scheme": args.reward_scheme,
+        "reward_func_names": reward_func_names,
         "train_slice": args.train_slice,
         "eval_size": args.eval_size,
         "max_steps": args.max_steps,
         "max_prompt_length": args.max_prompt_length,
         "max_completion_length": args.max_completion_length,
+        "learning_rate": args.learning_rate,
+        "save_steps": args.save_steps,
+        "save_total_limit": args.save_total_limit,
+        "num_generations": args.num_generations,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "temperature": args.temperature,
+        "beta": args.beta,
         "use_vllm": args.use_vllm,
         "vllm_mode": args.vllm_mode,
         "vllm_server_host": args.vllm_server_host,
         "vllm_server_port": args.vllm_server_port,
+        "experiment_dir": str(experiment_dir),
         "output_dir": str(output_dir),
+        "use_run_subdir": args.use_run_subdir,
         "hf_home": os.environ["HF_HOME"],
         "hf_datasets_cache": os.environ["HF_DATASETS_CACHE"],
         "wandb_dir": os.environ["WANDB_DIR"],
         "wandb_project": args.wandb_project,
         "wandb_run_name": run_name,
+        "offline": args.offline,
         "train_examples": len(train_dataset),
         "eval_examples": len(eval_dataset),
         "max_train_prompt_tokens": train_prompt_max,
@@ -256,11 +453,22 @@ def main() -> None:
     }
     write_run_metadata(output_dir, metadata)
 
-    trainer.train()
-
     final_adapter_dir = output_dir / "final_adapter"
+    train_result = trainer.train()
     trainer.save_model(str(final_adapter_dir))
     tokenizer.save_pretrained(final_adapter_dir)
+
+    training_summary = build_training_summary(
+        args=args,
+        run_name=run_name,
+        experiment_dir=experiment_dir,
+        output_dir=output_dir,
+        final_adapter_dir=final_adapter_dir,
+        reward_func_names=reward_func_names,
+        trainer=trainer,
+        train_result=train_result,
+    )
+    persist_training_summary(experiment_dir, output_dir, run_name, training_summary)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -23,11 +24,13 @@ DEFAULT_WANDB_PROJECT = "nano-grpo-qwen05b"
 GOLD_ANSWER_RE = re.compile(r"####\s*([^\n]+)")
 FINAL_ANSWER_RE = re.compile(r"final\s*answer\s*:\s*(.+)", re.IGNORECASE)
 NUMBER_TOKEN_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?(?:/\d+)?")
+SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 SYSTEM_PROMPT = (
     "You are a careful math tutor. Solve the problem clearly and concisely. "
-    "You may reason briefly, but the final line must be exactly in the format "
-    "`Final answer: <number>`."
+    "Use at most 3 short reasoning lines. "
+    "The final line must be exactly `Final answer: <number>`. "
+    "Do not add any text after the final answer line."
 )
 
 
@@ -59,6 +62,7 @@ def ensure_directory(path: Path) -> Path:
 def configure_runtime_env(
     dataset_root: str | Path = DEFAULT_DATASET_ROOT,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+    offline: bool = False,
 ) -> RuntimePaths:
     dataset_root = Path(dataset_root).expanduser().resolve()
     hf_home = dataset_root / "hf"
@@ -75,6 +79,10 @@ def configure_runtime_env(
     os.environ["TRANSFORMERS_CACHE"] = str(transformers_cache)
     os.environ["WANDB_DIR"] = str(wandb_dir)
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    if offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["HF_DATASETS_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     return RuntimePaths(
         dataset_root=dataset_root,
@@ -86,8 +94,21 @@ def configure_runtime_env(
 
 
 def build_default_run_name(prefix: str = "grpo-gsm8k-qwen25-05b") -> str:
+    return f"{prefix}-{build_timestamp_tag()}"
+
+
+def build_timestamp_tag() -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return f"{prefix}-{timestamp}"
+    return timestamp
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def sanitize_filename(value: str) -> str:
+    sanitized = SAFE_FILENAME_RE.sub("-", value).strip("-")
+    return sanitized or "run"
 
 
 def _normalize_decimal(value: Decimal) -> str:
@@ -186,3 +207,31 @@ def has_wandb_auth_configured() -> bool:
 
 def build_eval_jsonl_path(output_dir: str | Path) -> Path:
     return Path(output_dir).expanduser().resolve() / "smoke_eval.jsonl"
+
+
+def build_run_results_jsonl_path(output_dir: str | Path) -> Path:
+    return Path(output_dir).expanduser().resolve() / "run_results.jsonl"
+
+
+def build_run_summary_path(output_dir: str | Path, summary_type: str, label: str) -> Path:
+    output_dir = Path(output_dir).expanduser().resolve()
+    summaries_dir = output_dir / "run_summaries"
+    summaries_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{summary_type}_{sanitize_filename(label)}_{build_timestamp_tag()}.json"
+    return summaries_dir / filename
+
+
+def write_json_file(path: str | Path, payload: dict[str, Any]) -> Path:
+    path = Path(path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=True)
+    return path
+
+
+def append_jsonl_record(path: str | Path, payload: dict[str, Any]) -> Path:
+    path = Path(path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    return path
