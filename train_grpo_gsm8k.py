@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from dense_reward_v2 import build_dense_reward_v2_funcs
@@ -359,9 +360,45 @@ def persist_training_summary(experiment_dir: Path, output_dir: Path, run_name: s
         append_jsonl_record(aggregate_results_path, summary)
 
 
+def cleanup_training_runtime(trainer=None, exit_code: int = 0) -> None:
+    cleanup_errors = []
+
+    accelerator = getattr(trainer, "accelerator", None) if trainer is not None else None
+    if accelerator is not None and hasattr(accelerator, "end_training"):
+        try:
+            accelerator.end_training()
+        except Exception as exc:  # pragma: no cover - best-effort cleanup path
+            cleanup_errors.append(f"accelerator.end_training failed: {exc}")
+
+    try:
+        import wandb
+
+        if wandb.run is not None:
+            wandb.finish(exit_code=exit_code)
+    except Exception as exc:  # pragma: no cover - best-effort cleanup path
+        cleanup_errors.append(f"wandb.finish failed: {exc}")
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+    except Exception as exc:  # pragma: no cover - best-effort cleanup path
+        cleanup_errors.append(f"torch cleanup failed: {exc}")
+
+    for message in cleanup_errors:
+        print(f"[cleanup warning] {message}", file=sys.stderr)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    trainer = None
+    exit_code = 0
 
     runtime_paths = configure_runtime_env(args.dataset_root, args.output_dir, offline=args.offline)
     run_name = args.wandb_run_name or build_default_run_name()
@@ -453,22 +490,28 @@ def main() -> None:
     }
     write_run_metadata(output_dir, metadata)
 
-    final_adapter_dir = output_dir / "final_adapter"
-    train_result = trainer.train()
-    trainer.save_model(str(final_adapter_dir))
-    tokenizer.save_pretrained(final_adapter_dir)
+    try:
+        final_adapter_dir = output_dir / "final_adapter"
+        train_result = trainer.train()
+        trainer.save_model(str(final_adapter_dir))
+        tokenizer.save_pretrained(final_adapter_dir)
 
-    training_summary = build_training_summary(
-        args=args,
-        run_name=run_name,
-        experiment_dir=experiment_dir,
-        output_dir=output_dir,
-        final_adapter_dir=final_adapter_dir,
-        reward_func_names=reward_func_names,
-        trainer=trainer,
-        train_result=train_result,
-    )
-    persist_training_summary(experiment_dir, output_dir, run_name, training_summary)
+        training_summary = build_training_summary(
+            args=args,
+            run_name=run_name,
+            experiment_dir=experiment_dir,
+            output_dir=output_dir,
+            final_adapter_dir=final_adapter_dir,
+            reward_func_names=reward_func_names,
+            trainer=trainer,
+            train_result=train_result,
+        )
+        persist_training_summary(experiment_dir, output_dir, run_name, training_summary)
+    except Exception:
+        exit_code = 1
+        raise
+    finally:
+        cleanup_training_runtime(trainer=trainer, exit_code=exit_code)
 
 
 if __name__ == "__main__":
