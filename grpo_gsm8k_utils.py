@@ -25,6 +25,7 @@ GOLD_ANSWER_RE = re.compile(r"####\s*([^\n]+)")
 FINAL_ANSWER_RE = re.compile(r"final\s*answer\s*:\s*(.+)", re.IGNORECASE)
 NUMBER_TOKEN_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?(?:/\d+)?")
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+GSM8K_SCRATCH_RE = re.compile(r"<<[^<>]*>>")
 
 SYSTEM_PROMPT = (
     "You are a careful math tutor. Solve the problem clearly and concisely. "
@@ -162,11 +163,77 @@ def build_prompt(question: str) -> list[dict[str, str]]:
     ]
 
 
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _group_segments(segments: list[str], max_groups: int) -> list[str]:
+    if len(segments) <= max_groups:
+        return segments
+    grouped = []
+    chunk_size = (len(segments) + max_groups - 1) // max_groups
+    for start in range(0, len(segments), chunk_size):
+        grouped.append(_normalize_whitespace(" ".join(segments[start : start + chunk_size])))
+    return grouped[:max_groups]
+
+
+def extract_gsm8k_reasoning_text(answer: str) -> str:
+    reasoning_text, _, _ = answer.partition("####")
+    reasoning_text = GSM8K_SCRATCH_RE.sub("", reasoning_text)
+    reasoning_text = reasoning_text.replace("\r\n", "\n").replace("\r", "\n")
+    return reasoning_text.strip()
+
+
+def build_sft_response(answer: str) -> str:
+    solution = extract_gold_solution(answer)
+    reasoning_text = extract_gsm8k_reasoning_text(answer)
+
+    raw_segments = []
+    if reasoning_text:
+        for line in reasoning_text.splitlines():
+            line = _normalize_whitespace(line)
+            if not line:
+                continue
+            sentence_like_parts = re.split(r"(?<=[.!?])\s+", line)
+            for part in sentence_like_parts:
+                part = _normalize_whitespace(part)
+                if part:
+                    raw_segments.append(part)
+
+    reasoning_lines = _group_segments(raw_segments, max_groups=3)
+    if not reasoning_lines and reasoning_text:
+        reasoning_lines = [_normalize_whitespace(reasoning_text)]
+
+    response_lines = reasoning_lines[:3]
+    response_lines.append(f"Final answer: {solution}")
+    return "\n".join(response_lines)
+
+
+def build_sft_messages(question: str, answer: str) -> list[dict[str, str]]:
+    return build_prompt(question) + [{"role": "assistant", "content": build_sft_response(answer)}]
+
+
+def build_sft_completion(answer: str) -> list[dict[str, str]]:
+    return [{"role": "assistant", "content": build_sft_response(answer)}]
+
+
 def preprocess_gsm8k_example(example: dict[str, Any], index: int, split_name: str) -> dict[str, Any]:
     return {
         "prompt": build_prompt(example["question"]),
         "question": example["question"].strip(),
         "solution": extract_gold_solution(example["answer"]),
+        "question_id": index if split_name == "train" else 100_000 + index,
+    }
+
+
+def preprocess_gsm8k_sft_example(example: dict[str, Any], index: int, split_name: str) -> dict[str, Any]:
+    response = build_sft_response(example["answer"])
+    return {
+        "prompt": build_prompt(example["question"]),
+        "completion": build_sft_completion(example["answer"]),
+        "question": example["question"].strip(),
+        "solution": extract_gold_solution(example["answer"]),
+        "response": response,
         "question_id": index if split_name == "train" else 100_000 + index,
     }
 
