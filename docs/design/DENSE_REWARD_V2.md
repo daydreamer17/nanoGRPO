@@ -4,7 +4,7 @@
 
 ## 背景
 
-当前版本的 reward 定义在 [train_grpo_gsm8k.py](train_grpo_gsm8k.py)：
+当前版本的 reward 定义在 [train_grpo_gsm8k.py](../../train_grpo_gsm8k.py)：
 
 - `format_reward`: 只要能解析出 `Final answer: <number>`，奖励 `0.2`
 - `answer_reward`: 最终数字与 gold 完全一致，奖励 `1.0`
@@ -193,7 +193,7 @@ I think the answer is fourteen.
 
 建议把当前两个 reward 扩成 5 个，并保留 reward 函数完全程序化。
 
-推荐新增的辅助函数放在 [grpo_gsm8k_utils.py](grpo_gsm8k_utils.py)：
+推荐新增的辅助函数放在 [grpo_gsm8k_utils.py](../../src/nanogrpo/grpo_gsm8k_utils.py)：
 
 - `extract_final_answer_line`
 - `has_trailing_text_after_final_answer`
@@ -201,7 +201,7 @@ I think the answer is fourteen.
 - `parse_numeric_value`
 - `relative_error`
 
-推荐在 [train_grpo_gsm8k.py](train_grpo_gsm8k.py) 中改成：
+推荐在 [train_grpo_gsm8k.py](../../train_grpo_gsm8k.py) 中改成：
 
 ```python
 reward_funcs = [
