@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compare base vs tuned model on a small GSM8K eval slice.")
     parser.add_argument("--dataset_root", type=str, default=str(DEFAULT_DATASET_ROOT))
     parser.add_argument("--output_dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
-    parser.add_argument("--model_name", type=str, default=DEFAULT_MODEL_NAME)
+    parser.add_argument("--model_name", type=str, default="")
     parser.add_argument("--adapter_path", type=str, default="")
     parser.add_argument("--eval_size", type=int, default=32)
     parser.add_argument("--max_prompt_length", type=int, default=256)
@@ -73,11 +73,10 @@ def load_model(model_name: str, adapter_path: str | None = None):
     from transformers import AutoModelForCausalLM
 
     dtype = torch.bfloat16 if torch.cuda.is_available() else None
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=dtype,
-        device_map="auto",
-    )
+    model_kwargs = {"device_map": "auto"}
+    if dtype is not None:
+        model_kwargs["dtype"] = dtype
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     if adapter_path:
         model = PeftModel.from_pretrained(model, adapter_path)
     model.eval()
@@ -178,19 +177,22 @@ def main() -> None:
     if not Path(adapter_path).exists():
         raise SystemExit(f"Adapter path does not exist: {adapter_path}")
 
+    run_metadata = load_run_metadata(output_dir)
+    model_name = args.model_name or run_metadata.get("model_name") or DEFAULT_MODEL_NAME
+
     from transformers import AutoTokenizer
     import torch
 
     eval_dataset = load_eval_dataset(args.eval_size)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     max_prompt_tokens = ensure_prompt_length_budget(eval_dataset, tokenizer, args.max_prompt_length)
 
-    base_model = load_model(args.model_name)
+    base_model = load_model(model_name)
     base_predictions = generate_predictions(
         base_model,
         tokenizer,
@@ -202,7 +204,7 @@ def main() -> None:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    tuned_model = load_model(args.model_name, adapter_path=adapter_path)
+    tuned_model = load_model(model_name, adapter_path=adapter_path)
     tuned_predictions = generate_predictions(
         tuned_model,
         tokenizer,
@@ -228,10 +230,10 @@ def main() -> None:
         "tuned_exact_match_rate": tuned_correct / len(rows) if rows else 0.0,
         "base_format_hits": sum(row["base_answer"] is not None for row in rows),
         "tuned_format_hits": sum(row["tuned_answer"] is not None for row in rows),
+        "model_name": model_name,
         "offline": args.offline,
         "batch_size": args.batch_size,
     }
-    run_metadata = load_run_metadata(output_dir)
     experiment_dir = output_dir
     if run_metadata:
         summary["run_name"] = run_metadata.get("wandb_run_name")

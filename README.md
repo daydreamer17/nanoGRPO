@@ -22,6 +22,7 @@
 - `run_second_round_eval.sh`: 一次性跑完第二轮 checkpoint sweep 的脚本
 - `DENSE_REWARD_V2.md`: 下一版更 dense reward 设计文档
 - `SFT_TO_GRPO_CHAIN.md`: `SFT + LoRA -> GRPO` 链路说明
+- `NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md`: 当前最新一轮 `SFT -> GRPO` 复盘与下一轮建议
 
 ## SFT + LoRA -> GRPO
 
@@ -44,6 +45,31 @@ OFFLINE=true \
 RUN_NAME=sft-gsm8k-qwen25-05b-1000 \
 bash prepare_sft_to_grpo.sh
 ```
+
+## 最新结果
+
+截至目前，这条线里最值得关注的两个结果是：
+
+- 纯 `SFT`:
+  - `train[:1000]`
+  - `34 / 128`
+  - `format_hits = 116 / 128`
+- `SFT -> GRPO`:
+  - run: `grpo-gsm8k-qwen25-05b-sftinit-1000-lr15e6`
+  - best checkpoint: `checkpoint-100`
+  - `38 / 128`
+
+这说明：
+
+- `SFT` 已经能把格式和基础答题能力拉到一个很强的起点
+- `GRPO` 在这个起点上还能继续带来小幅但真实的提升
+
+当前这条路线下，优先推荐保留：
+
+- `SFT merged_model`: `/root/autodl-tmp/outputs/nano-grpo-qwen05b/sft-gsm8k-qwen25-05b-1000/merged_model`
+- best GRPO adapter: `/root/autodl-tmp/outputs/nano-grpo-qwen05b/grpo-gsm8k-qwen25-05b-sftinit-1000-lr15e6/checkpoint-100`
+
+下一轮更具体的建议见 [NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md](NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md)。
 
 ## 1. 创建环境
 
@@ -223,6 +249,14 @@ CUDA_VISIBLE_DEVICES=0 accelerate launch \
 ## Checkpoint Sweep
 
 推荐在每轮训练后都跑一次 checkpoint sweep，不要默认 `final_adapter` 或最后一个 checkpoint 最好。
+
+现在两个 sweep 脚本都会自动从当前 run 的 `run_metadata.json` 里读取 `model_name`。
+这意味着：
+
+- 普通 `base -> GRPO` run 会自动用原始 base model 做对比
+- `SFT -> GRPO` run 会自动用 `SFT merged_model` 做对比
+
+也就是说，当前版本不再需要你手动给 sweep 脚本补 `--model_name`。
 
 单个 checkpoint 评估：
 

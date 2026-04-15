@@ -55,6 +55,17 @@ print(metadata.get("wandb_run_name", ""))
 PY
 )"
 
+MODEL_NAME_FROM_METADATA="$(python - <<'PY' "$RUN_METADATA_PATH"
+import json
+import sys
+from pathlib import Path
+metadata = json.loads(Path(sys.argv[1]).read_text())
+print(metadata.get("model_name", ""))
+PY
+)"
+
+MODEL_NAME="${MODEL_NAME:-$MODEL_NAME_FROM_METADATA}"
+
 REWARD_SCHEME="$(python - <<'PY' "$RUN_METADATA_PATH"
 import json
 import sys
@@ -85,6 +96,7 @@ run_eval() {
   CUDA_VISIBLE_DEVICES="$GPU_ID" python smoke_eval.py \
     --dataset_root "$DATASET_ROOT" \
     --output_dir "$RUN_DIR" \
+    --model_name "$MODEL_NAME" \
     --adapter_path "$adapter_path" \
     --eval_size "$eval_size" \
     --batch_size "$BATCH_SIZE" \
@@ -95,6 +107,7 @@ run_eval() {
 echo "Experiment dir: $EXPERIMENT_DIR"
 echo "Run dir: $RUN_DIR"
 echo "Run name: $RUN_NAME"
+echo "Base model: $MODEL_NAME"
 echo "Reward scheme: $REWARD_SCHEME"
 echo "GPU: $GPU_ID"
 echo "Phase 1 eval_size: $PHASE1_EVAL_SIZE"
