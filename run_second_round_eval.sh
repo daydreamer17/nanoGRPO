@@ -36,9 +36,25 @@ resolve_run_dir() {
 }
 
 RUN_DIR="${RUN_DIR:-$(resolve_run_dir "$EXPERIMENT_DIR")}"
+RUN_METADATA_PATH="$RUN_DIR/run_metadata.json"
+
+MODEL_NAME_FROM_METADATA=""
+if [[ -f "$RUN_METADATA_PATH" ]]; then
+  MODEL_NAME_FROM_METADATA="$(python - <<'PY' "$RUN_METADATA_PATH"
+import json
+import sys
+from pathlib import Path
+metadata = json.loads(Path(sys.argv[1]).read_text())
+print(metadata.get("model_name", ""))
+PY
+)"
+fi
+
+MODEL_NAME="${MODEL_NAME:-$MODEL_NAME_FROM_METADATA}"
 
 echo "Experiment dir: $EXPERIMENT_DIR"
 echo "Run dir: $RUN_DIR"
+echo "Base model: ${MODEL_NAME:-<default>}"
 echo "Eval size: $EVAL_SIZE"
 echo "GPU: $GPU_ID"
 
@@ -54,6 +70,7 @@ for step in $CHECKPOINT_STEPS_STRING; do
   CUDA_VISIBLE_DEVICES="$GPU_ID" python smoke_eval.py \
     --dataset_root "$DATASET_ROOT" \
     --output_dir "$RUN_DIR" \
+    --model_name "$MODEL_NAME" \
     --adapter_path "$adapter_path" \
     --eval_size "$EVAL_SIZE" \
     --offline true \
@@ -66,6 +83,7 @@ if [[ -d "$RUN_DIR/final_adapter" ]]; then
   CUDA_VISIBLE_DEVICES="$GPU_ID" python smoke_eval.py \
     --dataset_root "$DATASET_ROOT" \
     --output_dir "$RUN_DIR" \
+    --model_name "$MODEL_NAME" \
     --adapter_path "$RUN_DIR/final_adapter" \
     --eval_size "$EVAL_SIZE" \
     --offline true \
