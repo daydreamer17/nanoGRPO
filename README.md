@@ -12,12 +12,38 @@
 ## 文件
 
 - `setup_env.sh`: 创建独立 conda 环境并安装固定版本依赖
+- `train_sft_gsm8k.py`: `SFT + LoRA` 训练入口
 - `train_grpo_gsm8k.py`: 训练入口
+- `merge_lora_adapter.py`: 把 LoRA adapter 合并为独立模型目录
 - `grpo_gsm8k_utils.py`: 数据预处理、答案解析、缓存目录与 W&B 校验辅助函数
 - `dense_reward_v2.py`: `Dense Reward V2` 的独立实现
+- `prepare_sft_to_grpo.sh`: 一键跑完 `SFT -> merge` 的准备脚本
 - `accelerate_config.yaml`: 单卡 trainer 配置
 - `run_second_round_eval.sh`: 一次性跑完第二轮 checkpoint sweep 的脚本
 - `DENSE_REWARD_V2.md`: 下一版更 dense reward 设计文档
+- `SFT_TO_GRPO_CHAIN.md`: `SFT + LoRA -> GRPO` 链路说明
+
+## SFT + LoRA -> GRPO
+
+现在仓库里已经支持一条更稳的链路：
+
+1. `train_sft_gsm8k.py` 先做 `SFT + LoRA`
+2. `merge_lora_adapter.py` 把 `SFT adapter` 合并成新的本地 base model
+3. `train_grpo_gsm8k.py --model_name <merged_model_dir>` 再从这个起点继续做 `GRPO`
+
+如果你要直接走这条链路，优先看 [SFT_TO_GRPO_CHAIN.md](SFT_TO_GRPO_CHAIN.md)。  
+其中最省事的起手命令是：
+
+```bash
+cd /root/nanoGRPO
+GPU_ID=0 \
+TRAIN_SLICE='train[:1000]' \
+MAX_STEPS=200 \
+EVAL_SIZE=64 \
+OFFLINE=true \
+RUN_NAME=sft-gsm8k-qwen25-05b-1000 \
+bash prepare_sft_to_grpo.sh
+```
 
 ## 1. 创建环境
 
