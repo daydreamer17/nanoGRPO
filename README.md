@@ -9,20 +9,43 @@
 - 日志：`wandb` 在线同步
 - 缓存与输出：统一放到 `/root/autodl-tmp`
 
-## 文件
+## 目录结构
 
-- `setup_env.sh`: 创建独立 conda 环境并安装固定版本依赖
-- `train_sft_gsm8k.py`: `SFT + LoRA` 训练入口
-- `train_grpo_gsm8k.py`: 训练入口
-- `merge_lora_adapter.py`: 把 LoRA adapter 合并为独立模型目录
-- `grpo_gsm8k_utils.py`: 数据预处理、答案解析、缓存目录与 W&B 校验辅助函数
-- `dense_reward_v2.py`: `Dense Reward V2` 的独立实现
-- `prepare_sft_to_grpo.sh`: 一键跑完 `SFT -> merge` 的准备脚本
-- `accelerate_config.yaml`: 单卡 trainer 配置
-- `run_second_round_eval.sh`: 一次性跑完第二轮 checkpoint sweep 的脚本
-- `DENSE_REWARD_V2.md`: 下一版更 dense reward 设计文档
-- `SFT_TO_GRPO_CHAIN.md`: `SFT + LoRA -> GRPO` 链路说明
-- `NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md`: 当前最新一轮 `SFT -> GRPO` 复盘与下一轮建议
+```text
+nanoGRPO/
+├── src/nanogrpo/
+│   ├── cli/                      # Python CLI 实现
+│   ├── dense_reward_v2.py        # Dense Reward V2 实现
+│   └── grpo_gsm8k_utils.py       # 共享工具函数
+├── scripts/                      # Shell 工作流脚本
+├── configs/                      # 训练配置
+├── docs/
+│   ├── design/                   # 设计文档
+│   ├── guides/                   # 使用指南
+│   └── experiments/              # 实验复盘与规划
+└── *.py / *.sh                   # 根目录兼容入口
+```
+
+## 主要入口
+
+- `src/nanogrpo/cli/`: 训练、评估、merge 的实际 Python 实现
+- `scripts/`: 环境准备、`SFT -> merge`、checkpoint sweep 等一键脚本
+- `configs/accelerate_config.yaml`: 单卡 trainer 配置
+- `docs/design/DENSE_REWARD_V2.md`: `Dense Reward V2` 设计文档
+- `docs/guides/SFT_TO_GRPO_CHAIN.md`: `SFT + LoRA -> GRPO` 链路说明
+- `docs/experiments/NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md`: 当前最新一轮 `SFT -> GRPO` 复盘与下一轮建议
+
+为了兼容现有命令，根目录仍然保留这些薄包装入口：
+
+- `train_sft_gsm8k.py`
+- `train_grpo_gsm8k.py`
+- `smoke_eval.py`
+- `merge_lora_adapter.py`
+- `prepare_sft_to_grpo.sh`
+- `run_dense_v2_eval_sweep.sh`
+- `run_second_round_eval.sh`
+- `setup_env.sh`
+- `accelerate_config.yaml`
 
 ## SFT + LoRA -> GRPO
 
@@ -32,7 +55,7 @@
 2. `merge_lora_adapter.py` 把 `SFT adapter` 合并成新的本地 base model
 3. `train_grpo_gsm8k.py --model_name <merged_model_dir>` 再从这个起点继续做 `GRPO`
 
-如果你要直接走这条链路，优先看 [SFT_TO_GRPO_CHAIN.md](SFT_TO_GRPO_CHAIN.md)。  
+如果你要直接走这条链路，优先看 [docs/guides/SFT_TO_GRPO_CHAIN.md](docs/guides/SFT_TO_GRPO_CHAIN.md)。  
 其中最省事的起手命令是：
 
 ```bash
@@ -69,7 +92,7 @@ bash prepare_sft_to_grpo.sh
 - `SFT merged_model`: `/root/autodl-tmp/outputs/nano-grpo-qwen05b/sft-gsm8k-qwen25-05b-1000/merged_model`
 - best GRPO adapter: `/root/autodl-tmp/outputs/nano-grpo-qwen05b/grpo-gsm8k-qwen25-05b-sftinit-1000-lr15e6/checkpoint-100`
 
-下一轮更具体的建议见 [NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md](NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md)。
+下一轮更具体的建议见 [docs/experiments/NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md](docs/experiments/NEXT_ITERATION_PLAN_AFTER_SFT_TO_GRPO_20260415.md)。
 
 ## 1. 创建环境
 

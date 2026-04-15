@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from grpo_gsm8k_utils import (
+from nanogrpo.grpo_gsm8k_utils import (
     canonicalize_numeric_text,
     completion_to_text,
     extract_final_answer_from_text,
